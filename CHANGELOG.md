@@ -328,6 +328,48 @@
 **Next:**
 - Step 10: write the final `README.md` per TASK §6 — architecture diagram, store choice, extraction pipeline writeup, recall strategy, fact evolution defense, tradeoffs, failure modes, run-the-tests instructions. Also a final pass on the CHANGELOG to make sure each entry stands on its own.
 
+---
+
+## v1.0 — Submission. README, final tuning, summary metrics (2026-05-09)
+
+**What changed:**
+- `README.md` rewritten from stub to full architecture writeup matching TASK.md §6 sections one-for-one:
+  1. TL;DR + quick-start.
+  2. Architecture diagram (ASCII).
+  3. Backing-store choice + schema rationale.
+  4. Extraction pipeline (what / how / what it misses, with reasons).
+  5. Recall strategy end-to-end with the priority logic defended.
+  6. Fact evolution + supersession verdict table.
+  7. Tradeoffs (optimized for / gave up).
+  8. Failure modes table (LLM down, embed down, rerank down, oversized payload, restart mid-write, etc.).
+  9. Test suite layout.
+  10. Project layout reference.
+  11. "What I'd do next" section.
+  12. Originality statement.
+- Final integration test run: **21/21 green**.
+
+**Why:**
+- TASK.md §6 *"a reviewer should walk to understanding the design in 5 minutes"* — the README is the single artifact most readers see first. It needs to do the heavy lifting on architecture, the CHANGELOG does the heavy lifting on iteration story. Splitting the work this way lets each document do one job well.
+- Defending design choices in writing now (rather than only in interview) means a reviewer who never talks to me can still grade the system fairly.
+
+**Final metrics summary (across the 10-step iteration):**
+
+| Step | Headline | recall@5 | multi-hop | noise | tests | latency p95 |
+|---|---|---|---|---|---|---|
+| v0.1 | scaffold + schema | — | — | — | — | — |
+| v0.2 | raw turn store + DELETE | — | — | — | 7/7 contract | — |
+| v0.3 | naive embedding recall | 75% | 100% | 0% | 7/7 | ~110ms |
+| v0.4 | LLM extraction | 83% | 100% | 0% | 7/7 | ~250ms |
+| v0.5 | hybrid BM25 + RRF | 83% | 100% | 0% | 7/7 | ~120ms |
+| v0.6 | + Alem reranker | 100% | 100% | 100% | 8/8 | ~250ms |
+| v0.7 | + supersession | 100% | 100% | 100% | 9/9 | ~250ms |
+| v0.8 | + multi-hop decomposition | 100% | 100% | 100% | 9/9 | ~700–900ms |
+| v0.9 | + budget assembly | 100% | 100% | 100% | 14/14 | ~700–900ms |
+| v1.0-rc | + robustness/persistence | 100% | 100% | 100% | 21/21 | ~700–900ms |
+| **v1.0** | submission | **100%** | **100%** | **100%** | **21/21** | **~700–900ms** |
+
+The biggest single jump was v0.6 (reranker + 3rd-person doc framing): noise resistance 0% → 100%. The biggest design risk addressed was v0.7 supersession (TASK §4 hard problem #1). Total ~14h focused work, on the original PLAN.md estimate.
+
 
 
 
