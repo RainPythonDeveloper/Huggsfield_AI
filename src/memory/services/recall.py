@@ -23,6 +23,7 @@ from memory.clients import embeddings, reranker
 from memory.config import get_settings
 from memory.schemas import Citation, RecallIn, RecallOut, SearchHit, SearchIn, SearchOut
 from memory.services import query_rewrite
+from memory.util import tokens
 from memory.util.rrf import reciprocal_rank_fusion
 
 log = logging.getLogger(__name__)
@@ -44,7 +45,17 @@ async def recall(req: RecallIn) -> RecallOut:
         query=req.query, candidates=candidates, top_n=RECALL_TOP_N, floor=RERANK_FLOOR
     )
 
-    if not final_rows:
+    # Bucket 3 (recent context): only fetched when budget allows; cheap query.
+    recent_msgs: list[dict] = []
+    if req.session_id:
+        try:
+            recent_msgs = await repository.fetch_recent_messages_for_session(
+                req.session_id, limit=4
+            )
+        except Exception as e:
+            log.warning("recent_fetch_failed", extra={"error": str(e)})
+
+    if not final_rows and not recent_msgs:
         # Cold-extraction fallback: maybe the extractor missed it but the raw
         # conversation has it. Run BM25 over messages.
         fallback = await repository.search_messages_by_bm25(
@@ -59,9 +70,13 @@ async def recall(req: RecallIn) -> RecallOut:
             )
         if not fallback:
             return RecallOut(context="", citations=[])
-        return _format_message_fallback(fallback)
+        return _format_message_fallback(fallback, budget=req.max_tokens)
 
-    return _format_recall(final_rows)
+    return _format_recall_budgeted(
+        rows=final_rows,
+        recent=recent_msgs,
+        budget=req.max_tokens,
+    )
 
 
 async def _retrieve(
@@ -249,43 +264,119 @@ async def _rerank_messages_filter(
     return out
 
 
-# ── Formatters ─────────────────────────────────────────────────────────────
+# ── Budget-aware assembly ─────────────────────────────────────────────────
+#
+# Priority (TASK.md §3 "stable user facts first, then query-relevant memories,
+# then recent context"):
+#
+#   Bucket 1 — stable user facts: type ∈ {fact, preference, relation},
+#              active=true. These are durable identity properties — almost
+#              always worth including.
+#
+#   Bucket 2 — query-relevant memories: anything else from rerank top-N
+#              (events, opinions). Order by rerank score desc.
+#
+#   Bucket 3 — recent context: last few raw messages from this session,
+#              for working-conversational continuity.
+#
+# We aim for soft cap = 0.95 × max_tokens to leave headroom (the consumer
+# may add extra system text). A bullet is dropped (not truncated) if adding
+# it would exceed the cap — truncation produces ugly half-sentences and
+# the extra precision isn't worth it.
+
+_SOFT_CAP_RATIO = 0.95
+_HEADER_USER_FACTS = "## Known facts about this user"
+_HEADER_QUERY_RELEVANT = "## Relevant memories"
+_HEADER_RECENT = "## Recent conversation"
 
 
-def _format_recall(rows: list[dict]) -> RecallOut:
+def _format_recall_budgeted(
+    *,
+    rows: list[dict],
+    recent: list[dict],
+    budget: int,
+) -> RecallOut:
     facts = [r for r in rows if r["type"] in ("fact", "preference", "relation")]
     other = [r for r in rows if r["type"] not in ("fact", "preference", "relation")]
 
+    soft_cap = max(1, int(budget * _SOFT_CAP_RATIO))
+    used = 0
     lines: list[str] = []
     citations: list[Citation] = []
 
+    def try_add(line: str) -> bool:
+        nonlocal used
+        cost = tokens.count(line) + 1  # +1 newline
+        if used + cost > soft_cap:
+            return False
+        lines.append(line)
+        used += cost
+        return True
+
+    # Bucket 1
     if facts:
-        lines.append("## Known facts about this user")
-        for r in facts:
-            lines.append(f"- {_humanize(r)}")
-            citations.append(_cite(r))
+        if try_add(_HEADER_USER_FACTS):
+            for r in facts:
+                bullet = f"- {_humanize(r)}"
+                if not try_add(bullet):
+                    break
+                citations.append(_cite(r))
+
+    # Bucket 2
     if other:
-        if lines:
-            lines.append("")
-        lines.append("## Relevant from recent conversations")
-        for r in other:
-            lines.append(f"- {_humanize(r)}")
-            citations.append(_cite(r))
+        if try_add("") and try_add(_HEADER_QUERY_RELEVANT):
+            for r in other:
+                bullet = f"- {_humanize(r)}"
+                if not try_add(bullet):
+                    break
+                citations.append(_cite(r))
+
+    # Bucket 3 — only enrich if budget remains AND we don't already have ≥4 facts
+    if recent and used < soft_cap * 0.8 and len(citations) < 6:
+        if try_add("") and try_add(_HEADER_RECENT):
+            for r in recent:
+                snippet = (r["content"] or "")[:160]
+                ts = r["timestamp"].strftime("%Y-%m-%d") if r.get("timestamp") else ""
+                bullet = f"- [{ts}] {snippet}" if ts else f"- {snippet}"
+                if not try_add(bullet):
+                    break
+                citations.append(
+                    Citation(
+                        turn_id=r.get("turn_id", ""),
+                        score=0.0,
+                        snippet=snippet[:DEFAULT_SNIPPET_CHARS],
+                    )
+                )
+
     return RecallOut(context="\n".join(lines).strip(), citations=citations)
 
 
-def _format_message_fallback(rows: list[dict]) -> RecallOut:
-    lines = ["## Relevant from recent conversations"]
+def _format_message_fallback(rows: list[dict], *, budget: int) -> RecallOut:
+    soft_cap = max(1, int(budget * _SOFT_CAP_RATIO))
+    used = 0
+    lines: list[str] = []
     citations: list[Citation] = []
-    for r in rows:
-        ts = r["timestamp"].strftime("%Y-%m-%d") if r.get("timestamp") else ""
-        snippet = (r["content"] or "")[:DEFAULT_SNIPPET_CHARS]
-        prefix = f"- [{ts}] " if ts else "- "
-        lines.append(f"{prefix}{snippet}")
-        score = float(r.get("_rerank_score") or r.get("score") or 0.0)
-        citations.append(
-            Citation(turn_id=r["turn_id"], score=score, snippet=snippet)
-        )
+
+    def try_add(line: str) -> bool:
+        nonlocal used
+        cost = tokens.count(line) + 1
+        if used + cost > soft_cap:
+            return False
+        lines.append(line)
+        used += cost
+        return True
+
+    if try_add("## Relevant from recent conversations"):
+        for r in rows:
+            ts = r["timestamp"].strftime("%Y-%m-%d") if r.get("timestamp") else ""
+            snippet = (r["content"] or "")[:DEFAULT_SNIPPET_CHARS]
+            bullet = f"- [{ts}] {snippet}" if ts else f"- {snippet}"
+            if not try_add(bullet):
+                break
+            score = float(r.get("_rerank_score") or r.get("score") or 0.0)
+            citations.append(
+                Citation(turn_id=r["turn_id"], score=score, snippet=snippet)
+            )
     return RecallOut(context="\n".join(lines), citations=citations)
 
 

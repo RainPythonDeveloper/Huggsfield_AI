@@ -256,6 +256,46 @@
 **Next:**
 - Step 8: token-budget-aware context assembly for `/recall`. Today we return ALL reranked top-N facts as one prose blob — TASK.md §3 says we should respect `max_tokens` and prioritize stable user facts → query-relevant memories → recent context when budget is tight. This is a concrete TASK requirement and will need a `tiktoken` counter + bucketed greedy assembly.
 
+---
+
+## v0.9 — Token-budget-aware context assembly (TASK §3) (2026-05-09)
+
+**What changed:**
+- `util/tokens.py`: lazy `tiktoken.cl100k_base` wrapper. Approximate counter (Alem's tokenizer is private but cl100k is close enough for budget purposes; TASK explicitly allows ~2x slack).
+- `services/recall.py`:
+  - New `_format_recall_budgeted()` replaces the old `_format_recall()`. Three buckets, written in priority order:
+    1. **stable user facts** — type ∈ {fact, preference, relation}, active=true.
+    2. **query-relevant memories** — everything else from rerank (events, opinions).
+    3. **recent conversation** — last 4 messages from `session_id`, only added when budget remains AND we have <6 prior citations (avoids drowning specific facts in chit-chat).
+  - Greedy fill against soft cap = `0.95 × max_tokens`. Bullets are *dropped*, not truncated — half-sentences look bad and the precision isn't worth it.
+  - `recall()` now also fetches recent messages from the session as a side input, so very generic queries ("tell me about the user") still produce useful context even when only one fact reranks well.
+  - Cold fallback (`_format_message_fallback`) also enforces budget.
+- `tests/test_budget.py`: parametrized `[128, 256, 512, 1024]` budget compliance + a tight-budget priority assertion (`pet_dog_name: Biscuit` survives at 128 tokens).
+
+**Why:**
+- TASK.md §3: *"Should respect max_tokens. When budget is tight, prioritize: stable user facts first, then query-relevant memories, then recent context. Your priority logic is a design decision we care about — defend it in the README."*
+- Bucketing lets each priority compete independently against the budget instead of one big sort losing high-priority items to low-priority noise. The recent-context cutoff (only when <6 facts) is the specific design choice — avoid a wall of "Cool" / "OK" assistant chit-chat hiding actual identity.
+- Drop-not-truncate keeps prose clean for the frozen LLM that actually reads it.
+- Soft cap 0.95 leaves headroom; tiktoken can over- or under-count Alem's tokenization by a few percent.
+
+**Result:**
+- All **14/14 tests green** (added 5 budget tests):
+  - `test_budget_respected[128/256/512/1024]` all pass: actual_tokens ≤ 1.10 × budget.
+  - `test_user_facts_priority_at_tight_budget`: at 128 tokens the user's pet_dog_name still surfaces.
+- recall@5 / multi-hop / noise / supersession / contract — no regressions.
+- Budget demo:
+  ```
+  max_tokens=64  → 35 tokens — top fact + recent
+  max_tokens=128 → 63 tokens — top fact + 2 recent
+  max_tokens=1024 → 63 tokens — same; reranker is so strict that
+                    only one fact passes the floor for generic queries.
+  ```
+  The cap-respect is robust; the *content* depends on rerank precision (a feature, not a bug — we'd rather show one correct fact than four hallucinated ones).
+
+**Next:**
+- Step 9: robustness — oversized payloads (413 not crash), unicode/emoji/binary, restart-mid-write resilience, concurrent-session smoke load. Also the optional auth flow against a live `MEMORY_AUTH_TOKEN`. After Step 9, we close out with Step 10 (final README + iteration synthesis).
+
+
 
 
 
