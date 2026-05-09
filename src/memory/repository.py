@@ -63,7 +63,12 @@ async def fetch_turn_messages(turn_id: str) -> list[dict[str, Any]]:
 async def fetch_messages_for_turn(turn_id: str) -> list[dict[str, Any]]:
     async with acquire() as conn:
         rows = await conn.fetch(
-            "SELECT id::text, content FROM messages WHERE turn_id = $1::uuid ORDER BY position ASC",
+            """
+            SELECT id::text, role, name, content, position
+            FROM messages
+            WHERE turn_id = $1::uuid
+            ORDER BY position ASC
+            """,
             turn_id,
         )
     return [dict(r) for r in rows]
@@ -158,5 +163,103 @@ async def list_user_memories(user_id: str) -> list[dict[str, Any]]:
             ORDER BY created_at DESC
             """,
             user_id,
+        )
+    return [dict(r) for r in rows]
+
+
+async def insert_memory(
+    *,
+    user_id: str,
+    session_id: str | None,
+    type_: str,
+    key: str,
+    value: str,
+    confidence: float,
+    raw_quote: str | None,
+    source_turn: str | None,
+    embedding_pgliteral: str,
+) -> str:
+    async with acquire() as conn:
+        row = await conn.fetchrow(
+            """
+            INSERT INTO memories (
+                user_id, session_id, type, key, value, confidence,
+                raw_quote, source_turn, source_session, embedding, active
+            )
+            VALUES ($1, $2, $3, $4, $5, $6, $7, $8::uuid, $2, $9::vector, TRUE)
+            RETURNING id::text
+            """,
+            user_id,
+            session_id,
+            type_,
+            key,
+            value,
+            confidence,
+            raw_quote,
+            source_turn,
+            embedding_pgliteral,
+        )
+    return row["id"]
+
+
+async def search_memories_by_embedding(
+    embedding_pgliteral: str,
+    *,
+    user_id: str | None,
+    session_id: str | None,
+    limit: int,
+    only_active: bool = True,
+) -> list[dict[str, Any]]:
+    """Cosine top-k over memory embeddings.
+
+    Scoping: by default we filter to user_id (cross-session is intentional —
+    a user's facts are theirs across all sessions). Only when user_id is None
+    do we fall back to session-scoping or global search.
+    """
+    where_parts: list[str] = []
+    args: list[Any] = [embedding_pgliteral]
+    if user_id is not None:
+        args.append(user_id)
+        where_parts.append(f"user_id = ${len(args)}")
+    elif session_id is not None:
+        args.append(session_id)
+        where_parts.append(f"session_id = ${len(args)}")
+    if only_active:
+        where_parts.append("active = TRUE")
+    args.append(limit)
+    where_sql = (" WHERE " + " AND ".join(where_parts)) if where_parts else ""
+    sql = f"""
+        SELECT id::text,
+               user_id, session_id, type, key, value, confidence,
+               raw_quote, source_turn::text AS source_turn,
+               created_at, updated_at, active,
+               1 - (embedding <=> $1::vector) AS score
+        FROM memories
+        {where_sql}
+        ORDER BY embedding <=> $1::vector ASC
+        LIMIT ${len(args)}
+    """
+    async with acquire() as conn:
+        rows = await conn.fetch(sql, *args)
+    return [dict(r) for r in rows]
+
+
+async def fetch_recent_messages_for_session(
+    session_id: str, limit: int = 6
+) -> list[dict[str, Any]]:
+    """Recent raw messages — used in /recall as a low-priority fallback bucket."""
+    async with acquire() as conn:
+        rows = await conn.fetch(
+            """
+            SELECT m.id::text AS message_id, m.turn_id::text, m.role, m.content,
+                   t.timestamp, t.session_id
+            FROM messages m
+            JOIN turns t ON t.id = m.turn_id
+            WHERE t.session_id = $1
+            ORDER BY t.timestamp DESC, m.position DESC
+            LIMIT $2
+            """,
+            session_id,
+            limit,
         )
     return [dict(r) for r in rows]

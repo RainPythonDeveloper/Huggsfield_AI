@@ -90,4 +90,38 @@
 **Next:**
 - Step 3: LLM extraction. Replace "embed every raw message" with "extract structured facts → embed those". This should both improve precision (canonical `key=role,value=Product Manager` beats free-text matching) and start populating `/users/{id}/memories` with structured records, which is the single biggest visible quality differentiator on the human review.
 
+---
+
+## v0.4 — LLM extraction pipeline (Alem `alemllm`) (2026-05-09)
+
+**What changed:**
+- `clients/llm.py`: Alem chat-completions wrapper with tenacity retry + http2.
+- `util/json_parse.py`: lenient parser — handles ` ```json ` fences, leading prose, and stray brackets. Returns `None` (not raise) so a single bad reply never breaks ingest.
+- `prompts/extract.py`: system prompt with explicit type taxonomy (`fact|preference|opinion|event|relation`), canonical key list, atomicity rule ("I work at Notion as a PM" → 2 memories), implicit/correction capture rules, and a strict JSON schema.
+- `services/extraction.py`: end-to-end pipeline — LLM call → lenient parse → schema clean → embed canonical "User's <key>: <value>" → `INSERT INTO memories`.
+- `services/ingest.py`: rewired — `POST /turns` now persists turn → calls extraction synchronously → memories available immediately. Per TASK.md §5 *"after /turns returns, ingested data must be immediately available via /recall"*.
+- `services/recall.py`: switched from `messages.embedding` (Step 2) to `memories.embedding`. Output is now bucketed prose: "## Known facts about this user" + "## Relevant from recent conversations".
+- `repository.py`: `insert_memory`, `search_memories_by_embedding(only_active=True)`, `fetch_recent_messages_for_session` (used in Step 8 for the recent-context bucket).
+- `repository.fetch_messages_for_turn`: now also returns `role` and `name` (extraction needs role to skip assistant utterances).
+
+**Why:**
+- The TASK explicitly calls out that returning raw message chunks via `/memories` is a red flag (§4 *"if it returns raw message chunks instead of structured memories, that's a red flag"*). Step 3 closes this gap completely.
+- Embedding canonical text instead of raw messages narrows the semantic gap between user queries ("Where does the user work?") and stored knowledge ("employer: Notion") — a single fact replaces N noisy embeddings of full sentences containing that fact.
+- Synchronous extraction inside `/turns` keeps the contract simple. Eval harness has 60s/turn budget; our extraction takes ~4–5s/turn. No async orchestration overhead.
+- Lenient JSON parsing was load-bearing — Alem wraps every JSON in ` ```json ` fences, and direct `json.loads` would have killed the pipeline.
+
+**Result:**
+- **recall@5 = 10/12 = 83.33% (+8.33% vs v0.3)**.
+- multi-hop: 2/2 = 100% (unchanged).
+- noise: 0/2 = 0% (still — top-k always returns *something*; Step 5 reranker + score threshold fixes this).
+- `/memories` now returns rich structured records. Sanity ingest of one turn ("moved to Berlin, work at Notion as PM, switched from Stripe SWE, vegetarian, dog Biscuit (golden retriever)") yields 10 atomic memories with correct types and canonical keys.
+- Newly-passing probes vs v0.3: `career_role` (LLM normalized "senior product manager" → role:"Senior Product Manager"), `prefs_typescript_now`, `prefs_dietary` (vegetarian extracted as `dietary_restriction`), `pets_dog_breed` ("border collies" → pet_dog_breed:"Border Collie").
+- Failure tail is now ONLY the two noise probes — no more extraction-quality misses.
+- p95 ingest latency: ~4.5s/turn (1 LLM call + N parallel embeddings + N SQL inserts). Acceptable for the §3 60s SLA.
+- Visible side-effect of no supersession yet: `career_*` probes pass because both old and new employer surface in the context — but a real eval would penalize the stale Stripe entry showing up as "current". That's the headline fix for Step 6.
+
+**Next:**
+- Step 4: hybrid retrieval. Add BM25 over `memories.value_tsv` + raw-message FTS fallback for facts the extractor missed. RRF-fuse with the existing vector channel. This is what unlocks keyword-heavy queries ("dog's name?") where exact tokens beat semantic similarity, and gives us a corpus-grounded score we can threshold against in Step 5.
+
+
 

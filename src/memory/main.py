@@ -8,6 +8,7 @@ from fastapi.responses import JSONResponse
 
 from memory import __version__
 from memory.clients import embeddings as embed_client
+from memory.clients import llm as llm_client
 from memory.config import get_settings
 from memory.db import close_pool, init_pool, ping
 from memory.migrate import apply_migrations
@@ -33,6 +34,7 @@ async def lifespan(app: FastAPI):
     log.info("db_ready")
     yield
     await embed_client.close_clients()
+    await llm_client.close_clients()
     await close_pool()
     log.info("shutdown_complete")
 

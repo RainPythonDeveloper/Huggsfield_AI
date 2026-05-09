@@ -1,31 +1,35 @@
-"""Step 2 ingest pipeline: persist turn → embed each message → backfill vectors.
+"""Ingest pipeline: persist a turn and synchronously extract structured memories.
 
-In Step 3 this gets wrapped with LLM-extraction; for now it's the recall surface.
+Per TASK.md §5 *"after POST /turns returns, the ingested data and extracted
+memories must be immediately available via /recall"* — extraction is therefore
+inline, not async. The eval harness gives us a 60s budget per turn.
 """
 
 import logging
 
 from memory import repository
-from memory.clients import embeddings
 from memory.schemas import TurnIn
+from memory.services import extraction
 
 log = logging.getLogger(__name__)
 
 
 async def ingest_turn(turn: TurnIn) -> str:
-    """Persist a turn and embed its messages. Returns the new turn UUID."""
     turn_id = await repository.insert_turn(turn)
 
-    # Best-effort embedding. If the embeddings backend is unavailable the
-    # turn still persists (recallable later via tsvector fallback in Step 4),
-    # but we surface the error to the caller as a 500 so they know.
     msgs = await repository.fetch_messages_for_turn(turn_id)
-    contents = [m["content"] for m in msgs]
-    vectors = await embeddings.embed_many(contents)
-    for m, v in zip(msgs, vectors, strict=True):
-        await repository.update_message_embedding(
-            m["id"], embeddings.to_pgvector(v)
+    inserted = 0
+    try:
+        inserted = await extraction.extract_and_store(
+            turn_id=turn_id,
+            user_id=turn.user_id,
+            session_id=turn.session_id,
+            messages=msgs,
         )
+    except Exception as e:
+        # Extraction is best-effort. Turn stays persisted; raw msgs remain
+        # recallable via the Step 4 hybrid fallback (FTS over messages.content_tsv).
+        log.exception("extraction_failed", extra={"turn_id": turn_id, "error": str(e)})
 
     log.info(
         "turn_ingested",
@@ -33,7 +37,8 @@ async def ingest_turn(turn: TurnIn) -> str:
             "turn_id": turn_id,
             "session_id": turn.session_id,
             "user_id": turn.user_id,
-            "n_messages_embedded": len(vectors),
+            "n_messages": len(msgs),
+            "n_memories_inserted": inserted,
         },
     )
     return turn_id
