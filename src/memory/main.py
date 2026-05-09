@@ -5,6 +5,7 @@ from contextlib import asynccontextmanager
 from fastapi import FastAPI, Request
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
+from starlette.middleware.base import BaseHTTPMiddleware
 
 from memory import __version__
 from memory.clients import embeddings as embed_client
@@ -42,6 +43,28 @@ async def lifespan(app: FastAPI):
 
 
 app = FastAPI(title="memory-service", version=__version__, lifespan=lifespan)
+
+
+# ── Payload size guard (TASK §5 "must not crash on oversized payloads") ───
+MAX_BODY_BYTES = 1_000_000  # 1 MB; rich turns are kilobytes, this is generous
+
+
+class _BodySizeLimit(BaseHTTPMiddleware):
+    async def dispatch(self, request: Request, call_next):
+        cl = request.headers.get("content-length")
+        if cl and cl.isdigit() and int(cl) > MAX_BODY_BYTES:
+            return JSONResponse(
+                status_code=413,
+                content={
+                    "error": "payload_too_large",
+                    "max_bytes": MAX_BODY_BYTES,
+                },
+            )
+        return await call_next(request)
+
+
+app.add_middleware(_BodySizeLimit)
+
 
 app.include_router(turns.router)
 app.include_router(recall.router)

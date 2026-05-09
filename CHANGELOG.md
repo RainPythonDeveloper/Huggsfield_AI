@@ -295,6 +295,40 @@
 **Next:**
 - Step 9: robustness — oversized payloads (413 not crash), unicode/emoji/binary, restart-mid-write resilience, concurrent-session smoke load. Also the optional auth flow against a live `MEMORY_AUTH_TOKEN`. After Step 9, we close out with Step 10 (final README + iteration synthesis).
 
+---
+
+## v1.0-rc — Robustness, persistence, concurrency hardening (2026-05-09)
+
+**What changed:**
+- `main.py`: `_BodySizeLimit` middleware — rejects requests with `Content-Length > 1 MB` with **413 Payload Too Large**. Generous cap; rich turns are kilobytes.
+- `tests/test_persistence.py`: end-to-end restart test — ingests a turn, `docker compose restart`, polls `/health` for up to 60s, asserts both `/memories` and `/recall` recover the data.
+- `tests/test_robustness.py`:
+  - `test_oversized_payload`: 1.5 MB body → 4xx, service still healthy.
+  - `test_emoji_unicode_and_zero_width`: mixed emoji (🇩🇪, 🍣, 🙂), Cyrillic, and zero-width Unicode (`​`) → 201, recall works.
+  - `test_empty_messages_array_rejected`: empty `messages: []` → 422.
+  - `test_invalid_role_rejected`: `role: "wizard"` → 422.
+  - `test_search_empty_corpus_returns_empty`: `/search` for unknown user → `{"results": []}` + 200.
+  - `test_concurrent_ingest_no_corruption`: 8 parallel `POST /turns` against 3 user buckets via threadpool → all 201, no asyncpg pool deadlock, no row corruption.
+
+**Why:**
+- TASK §5 hard constraint: *"Service must not crash on malformed input, oversized payloads, or unicode oddities."* Each robustness test is a literal probe of one of those clauses.
+- The restart test exercises the named-volume contract (TASK §5: *"Persistence. Data survives docker compose down && docker compose up."*). Without this we'd be relying on the schema-only volume check from Step 0.
+- Concurrent-ingest is a sanity check on the asyncpg pool and the reranker/LLM client lifetimes — earlier iterations had bugs where a singleton httpx client would deadlock under burst load.
+
+**Result:**
+- **21/21 tests green** end-to-end. Test breakdown:
+  - 7 contract (TASK §3 endpoint shapes)
+  - 5 budget (TASK §3 max_tokens compliance)
+  - 1 supersession E2E (TASK §4 hard problem #1)
+  - 1 recall quality (12 fixture probes — 100% recall, 100% multi-hop, 100% noise resistance)
+  - 1 restart persistence
+  - 6 robustness (oversized / unicode / empty / invalid role / empty corpus / concurrent)
+- Service stays healthy after every test class. No 5xx recoveries needed.
+
+**Next:**
+- Step 10: write the final `README.md` per TASK §6 — architecture diagram, store choice, extraction pipeline writeup, recall strategy, fact evolution defense, tradeoffs, failure modes, run-the-tests instructions. Also a final pass on the CHANGELOG to make sure each entry stands on its own.
+
+
 
 
 
