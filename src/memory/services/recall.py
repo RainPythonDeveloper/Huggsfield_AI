@@ -22,6 +22,7 @@ from memory import repository
 from memory.clients import embeddings, reranker
 from memory.config import get_settings
 from memory.schemas import Citation, RecallIn, RecallOut, SearchHit, SearchIn, SearchOut
+from memory.services import query_rewrite
 from memory.util.rrf import reciprocal_rank_fusion
 
 log = logging.getLogger(__name__)
@@ -37,16 +38,10 @@ DEFAULT_SNIPPET_CHARS = 280
 
 
 async def recall(req: RecallIn) -> RecallOut:
-    fused = await _hybrid_memories(
-        query=req.query,
-        user_id=req.user_id,
-        session_id=req.session_id if req.user_id is None else None,
-        per_channel=RETRIEVAL_K,
-        fused_limit=FUSED_K,
-    )
+    candidates = await _retrieve(req.query, req.user_id, req.session_id)
 
     final_rows = await _rerank_and_filter(
-        query=req.query, candidates=fused, top_n=RECALL_TOP_N, floor=RERANK_FLOOR
+        query=req.query, candidates=candidates, top_n=RECALL_TOP_N, floor=RERANK_FLOOR
     )
 
     if not final_rows:
@@ -58,7 +53,6 @@ async def recall(req: RecallIn) -> RecallOut:
             session_id=req.session_id if req.user_id is None else None,
             limit=8,
         )
-        # Also rerank the fallback so noise queries don't surface random msgs.
         if fallback:
             fallback = await _rerank_messages_filter(
                 query=req.query, rows=fallback, top_n=5, floor=RERANK_FLOOR
@@ -68,6 +62,64 @@ async def recall(req: RecallIn) -> RecallOut:
         return _format_message_fallback(fallback)
 
     return _format_recall(final_rows)
+
+
+async def _retrieve(
+    query: str, user_id: str | None, session_id: str
+) -> list[dict]:
+    """Decompose multi-hop queries → run hybrid for each → merge with RRF.
+
+    Single-hop queries skip the merge and just return the hybrid result.
+    """
+    scope_session = session_id if user_id is None else None
+    decomp = await query_rewrite.analyze(query)
+
+    if not decomp["is_multi_hop"]:
+        return await _hybrid_memories(
+            query=query,
+            user_id=user_id,
+            session_id=scope_session,
+            per_channel=RETRIEVAL_K,
+            fused_limit=FUSED_K,
+        )
+
+    # Run all sub-queries in parallel.
+    tasks = [
+        _hybrid_memories(
+            query=sq,
+            user_id=user_id,
+            session_id=scope_session,
+            per_channel=RETRIEVAL_K,
+            fused_limit=FUSED_K,
+        )
+        for sq in decomp["sub_queries"]
+    ]
+    sub_results = await asyncio.gather(*tasks)
+    log.info(
+        "multi_hop_decomposed",
+        extra={
+            "query": query[:80],
+            "sub_queries": decomp["sub_queries"],
+            "n_subs": len(sub_results),
+            "hits_per_sub": [len(s) for s in sub_results],
+        },
+    )
+
+    channels = {f"sub_{i}": rows for i, rows in enumerate(sub_results) if rows}
+    if not channels:
+        # Decomposition produced no hits — fall back to original query as a
+        # safety net. Keeps the pipeline closed-loop.
+        return await _hybrid_memories(
+            query=query,
+            user_id=user_id,
+            session_id=scope_session,
+            per_channel=RETRIEVAL_K,
+            fused_limit=FUSED_K,
+        )
+
+    return reciprocal_rank_fusion(
+        channels, id_key="id", k=60, limit=FUSED_K
+    )
 
 
 # ── Hybrid retrieval ───────────────────────────────────────────────────────

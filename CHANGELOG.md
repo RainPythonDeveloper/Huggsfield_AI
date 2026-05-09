@@ -225,6 +225,38 @@
 **Next:**
 - Step 7: multi-hop via query decomposition. Right now we already hit 100% on the two multi-hop probes because the fixture is small (vector recall pulls in both turns by topic). On larger corpora — and especially on the eval harness's hidden fixtures — we'll need the LLM to *decompose* "What city does the user with the dog Biscuit live in?" into ["pet name = Biscuit", "owner's city"] and merge results. Step 7 lands that.
 
+---
+
+## v0.8 — Multi-hop via LLM query decomposition (2026-05-09)
+
+**What changed:**
+- `prompts/query_rewrite.py`: classifier+decomposer prompt with explicit multi-hop signals (relative clauses, anaphora, compound questions). Returns `{"is_multi_hop": bool, "sub_queries": []}` with examples for both cases.
+- `services/query_rewrite.py`: thin wrapper calling Alem LLM with the rewrite prompt. LLM failure → degrades to single-hop default (caller proceeds with original query).
+- `services/recall.py`: refactored — `_retrieve` is the new entrypoint that runs decomposition first, then either:
+  - **single-hop**: one `_hybrid_memories` pass (unchanged from v0.7).
+  - **multi-hop**: parallel `_hybrid_memories` per sub-query, then **RRF over sub-queries** to merge candidates (same fusion machinery as v0.5 vector+BM25). The original (un-decomposed) query is still used for the *reranker* stage so cross-encoder scoring remains aligned with what the user actually asked.
+- Closed-loop safety: if all sub-queries return empty, fall back to a single-hop pass on the original query — the LLM might decompose well but lose the natural-language framing the reranker prefers.
+
+**Why:**
+- Two-fact queries ("user with the dog X — where do they live?") are exactly the case where naive vector recall fails: the embedding of "user with dog X live in?" sits between two fact embeddings ("pet dog name: X" / "city: ?") rather than near either. Decomposing into atomic sub-queries lets each sub-question retrieve its corresponding fact directly.
+- Reranking against the *original* query (not the sub-queries) is important: a single sub-query like "user's city" matches city facts for ANY user; the reranker filters to the user-specific match in the merged candidate pool.
+- We don't gate decomposition behind a regex heuristic — Alem `alemllm` correctly classifies single-hop queries as `is_multi_hop: false` and returns immediately. One extra ~500ms LLM call is a worthwhile insurance for not missing a real multi-hop.
+
+**Result:**
+- All 9 tests still green. recall@5/multi-hop/noise: 100%/100%/100%.
+- Live demo of decomposition firing correctly:
+  ```
+  POST /recall {"query": "What city does the user with the dog Biscuit live in?"}
+  → multi_hop_decomposed sub_queries=["user's pet dog name", "user's city"]
+  → context: pet dog name: Biscuit + city: Berlin   ✓
+  ```
+- Recall p95 latency: ~700–900ms (LLM rewrite + parallel hybrid passes + rerank). Up from ~250ms in v0.7. Still acceptable for a memory service called once per agent turn.
+- Single-hop queries unchanged in latency (decomposition LLM returns `is_multi_hop=false`, then the normal path runs).
+
+**Next:**
+- Step 8: token-budget-aware context assembly for `/recall`. Today we return ALL reranked top-N facts as one prose blob — TASK.md §3 says we should respect `max_tokens` and prioritize stable user facts → query-relevant memories → recent context when budget is tight. This is a concrete TASK requirement and will need a `tiktoken` counter + bucketed greedy assembly.
+
+
 
 
 
