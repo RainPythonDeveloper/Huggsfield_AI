@@ -40,8 +40,8 @@ async def close_clients() -> None:
 
 
 @retry(
-    stop=stop_after_attempt(3),
-    wait=wait_exponential(multiplier=0.5, min=0.5, max=4.0),
+    stop=stop_after_attempt(5),
+    wait=wait_exponential(multiplier=0.6, min=0.6, max=8.0),
     retry=retry_if_exception_type((httpx.HTTPError, httpx.TimeoutException)),
     reraise=True,
 )

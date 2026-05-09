@@ -148,6 +148,41 @@
 **Next:**
 - Step 5: insert Alem reranker (cross-encoder) between RRF and prose assembly. Score Alem returns is well-calibrated (0.99 for relevant, 0.013 for irrelevant in the curl probe), so we can threshold ~0.3 to cut the noise tail and finally take noise resistance from 0% → ≥80%.
 
+---
+
+## v0.6 — Alem reranker (cross-encoder) + noise gating (2026-05-09)
+
+**What changed:**
+- `clients/reranker.py`: Alem `/v1/rerank` wrapper (Cohere-compatible); returns `[{index, score}]`.
+- `services/recall.py`: insert reranker stage between RRF and prose assembly. Top 20 from RRF → reranker → top 8 with `score >= RERANK_FLOOR (0.05)`.
+- Resilience: if vector embedding call fails (Alem 5xx), recall **degrades to BM25-only** instead of returning 500. If reranker fails, we keep the RRF order. The pipeline is now multi-channel-fault-tolerant.
+- Embeddings retry bumped to 5 attempts with 0.6→8s exponential backoff (Alem's 502s during testing motivated this).
+- Reranker doc-format calibration through three iterations (this was the load-bearing fix):
+
+  | Doc format | Score (relevant query) |
+  |---|---|
+  | `"employer: Notion. Original: ..."` | 0.0008 ❌ |
+  | `"I work at Notion as a PM"` (raw quote, first-person) | 0.003 ❌ |
+  | `"The user's employer is Notion. Originally said: I work at Notion..."` | **0.97** ✅ |
+
+  The reranker is sensitive to **subject framing**: queries say "the user", so docs must too. First-person quotes (the natural raw input) score near zero. We now render every doc as `"The user's <key humanized> is <value>. Originally said: <quote>"`.
+
+**Why:**
+- Vector cosine has no notion of "irrelevant" — top-k always returns *something*. A cross-encoder trained on relevance judges scores raw query/doc pairs and gives us a calibrated "is this actually relevant?" signal we can threshold against.
+- The third-person doc render is the trick that makes the reranker *usable*. Without it, the floor would have to be 1e-4 (catastrophic precision/recall tradeoff). With it, 0.05 is a clean cut.
+- BM25-only fallback was a defense against a specific incident: Alem embeddings returned 502 mid-test and the recall endpoint died with 500. Now the fallback path runs on the BM25 channel alone.
+
+**Result:**
+- **recall@5 = 12/12 = 100%** (+16.67 pts vs v0.5 / +25 pts vs v0.3 baseline).
+- **noise resistance: 0/2 → 2/2 = 100%** (the headline fix this step).
+- multi-hop: 2/2 = 100%.
+- 8/8 contract tests green: roundtrip, restart, cold session, malformed JSON, missing fields, unicode, concurrent-session isolation. **No regressions.**
+- Recall p95 latency: ~250ms (added ~130ms for the rerank API call). Well under any agent SLA.
+
+**Next:**
+- Step 6: supersession + contradiction handling. v0.6 still surfaces both "employer: Stripe" AND "employer: Notion" as active for the career-arc fixture — passes the probe by accident because both keywords match `must_contain`, but a stricter eval would mark this as wrong. Step 6 detects new fact ↔ existing active fact conflicts and chains supersession.
+
+
 
 
 
