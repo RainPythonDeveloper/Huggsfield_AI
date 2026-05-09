@@ -167,6 +167,59 @@ async def list_user_memories(user_id: str) -> list[dict[str, Any]]:
     return [dict(r) for r in rows]
 
 
+async def find_active_memories_by_key(
+    *,
+    user_id: str,
+    key: str,
+) -> list[dict[str, Any]]:
+    """Active memories for `(user_id, key)`. Used by supersession judge."""
+    async with acquire() as conn:
+        rows = await conn.fetch(
+            """
+            SELECT id::text, type, key, value, raw_quote, confidence,
+                   created_at, source_turn::text AS source_turn
+            FROM memories
+            WHERE user_id = $1 AND key = $2 AND active = TRUE
+            ORDER BY created_at DESC
+            """,
+            user_id,
+            key,
+        )
+    return [dict(r) for r in rows]
+
+
+async def mark_superseded(*, ids: list[str], by_id: str) -> None:
+    """Deactivate memories and link them to a new active one via supersedes."""
+    if not ids:
+        return
+    async with acquire() as conn:
+        await conn.execute(
+            """
+            UPDATE memories
+               SET active = FALSE,
+                   updated_at = NOW()
+             WHERE id = ANY($1::uuid[])
+            """,
+            ids,
+        )
+        # Set supersedes on the NEW memory pointing at the latest old one.
+        # We pick the most recent of the ids — it's the closest predecessor.
+        await conn.execute(
+            """
+            UPDATE memories
+               SET supersedes = (
+                       SELECT id FROM memories
+                        WHERE id = ANY($1::uuid[])
+                        ORDER BY created_at DESC
+                        LIMIT 1
+                   )
+             WHERE id = $2::uuid
+            """,
+            ids,
+            by_id,
+        )
+
+
 async def insert_memory(
     *,
     user_id: str,
@@ -178,6 +231,7 @@ async def insert_memory(
     raw_quote: str | None,
     source_turn: str | None,
     embedding_pgliteral: str,
+    active: bool = True,
 ) -> str:
     async with acquire() as conn:
         row = await conn.fetchrow(
@@ -186,7 +240,7 @@ async def insert_memory(
                 user_id, session_id, type, key, value, confidence,
                 raw_quote, source_turn, source_session, embedding, active
             )
-            VALUES ($1, $2, $3, $4, $5, $6, $7, $8::uuid, $2, $9::vector, TRUE)
+            VALUES ($1, $2, $3, $4, $5, $6, $7, $8::uuid, $2, $9::vector, $10)
             RETURNING id::text
             """,
             user_id,
@@ -198,6 +252,7 @@ async def insert_memory(
             raw_quote,
             source_turn,
             embedding_pgliteral,
+            active,
         )
     return row["id"]
 

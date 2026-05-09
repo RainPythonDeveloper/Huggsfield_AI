@@ -18,6 +18,7 @@ from typing import Any
 from memory import repository
 from memory.clients import embeddings, llm
 from memory.prompts import extract as ex_prompt
+from memory.services import supersession
 from memory.util.json_parse import parse_json_lenient
 
 log = logging.getLogger(__name__)
@@ -48,9 +49,22 @@ async def extract_and_store(
     vectors = await embeddings.embed_many(canonicals)
 
     inserted = 0
+    superseded = 0
+    skipped = 0
+    coexisted = 0
+    historical = 0
     for m, v in zip(memories, vectors, strict=True):
         try:
-            await repository.insert_memory(
+            decision = await supersession.resolve(
+                user_id=user_id, key=m["key"], candidate=m
+            )
+            verdict = decision["verdict"]
+            if verdict == "noop":
+                skipped += 1
+                continue
+
+            new_active = verdict != "keep_old"
+            new_id = await repository.insert_memory(
                 user_id=user_id,
                 session_id=session_id,
                 type_=m["type"],
@@ -60,10 +74,32 @@ async def extract_and_store(
                 raw_quote=m.get("raw_quote"),
                 source_turn=turn_id,
                 embedding_pgliteral=embeddings.to_pgvector(v),
+                active=new_active,
             )
+
+            if verdict == "supersede" and decision["supersede_ids"]:
+                await repository.mark_superseded(
+                    ids=decision["supersede_ids"], by_id=new_id
+                )
+                superseded += len(decision["supersede_ids"])
+            if verdict == "coexist":
+                coexisted += 1
+            if verdict == "keep_old":
+                historical += 1
             inserted += 1
         except Exception as e:
             log.warning("memory_insert_failed", extra={"error": str(e), "key": m.get("key")})
+
+    log.info(
+        "supersession_summary",
+        extra={
+            "turn_id": turn_id,
+            "superseded_old": superseded,
+            "coexist_inserts": coexisted,
+            "historical_inserts": historical,
+            "noop_skipped": skipped,
+        },
+    )
     log.info(
         "extraction_complete",
         extra={
