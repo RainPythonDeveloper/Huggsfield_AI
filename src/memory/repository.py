@@ -244,6 +244,87 @@ async def search_memories_by_embedding(
     return [dict(r) for r in rows]
 
 
+async def search_memories_by_bm25(
+    query: str,
+    *,
+    user_id: str | None,
+    session_id: str | None,
+    limit: int,
+    only_active: bool = True,
+) -> list[dict[str, Any]]:
+    """BM25-style FTS over `memories.value_tsv` (key + value tokens).
+
+    Uses `plainto_tsquery` so user query terms are tokenised the same way as
+    the indexed content. `ts_rank_cd` is cover-density ranking — favours hits
+    where query terms appear close together.
+    """
+    where_parts: list[str] = ["m.value_tsv @@ plainto_tsquery('english', $1)"]
+    args: list[Any] = [query]
+    if user_id is not None:
+        args.append(user_id)
+        where_parts.append(f"m.user_id = ${len(args)}")
+    elif session_id is not None:
+        args.append(session_id)
+        where_parts.append(f"m.session_id = ${len(args)}")
+    if only_active:
+        where_parts.append("m.active = TRUE")
+    args.append(limit)
+    where_sql = " AND ".join(where_parts)
+    sql = f"""
+        SELECT m.id::text,
+               m.user_id, m.session_id, m.type, m.key, m.value, m.confidence,
+               m.raw_quote, m.source_turn::text AS source_turn,
+               m.created_at, m.updated_at, m.active,
+               ts_rank_cd(m.value_tsv, plainto_tsquery('english', $1)) AS score
+        FROM memories m
+        WHERE {where_sql}
+        ORDER BY score DESC
+        LIMIT ${len(args)}
+    """
+    async with acquire() as conn:
+        rows = await conn.fetch(sql, *args)
+    return [dict(r) for r in rows]
+
+
+async def search_messages_by_bm25(
+    query: str,
+    *,
+    user_id: str | None,
+    session_id: str | None,
+    limit: int,
+) -> list[dict[str, Any]]:
+    """FTS fallback over raw `messages.content_tsv`. Used when the extractor
+    missed something — the conversation text itself is still queryable.
+    """
+    where_parts: list[str] = ["m.content_tsv @@ plainto_tsquery('english', $1)"]
+    args: list[Any] = [query]
+    if user_id is not None:
+        args.append(user_id)
+        where_parts.append(f"t.user_id = ${len(args)}")
+    elif session_id is not None:
+        args.append(session_id)
+        where_parts.append(f"t.session_id = ${len(args)}")
+    args.append(limit)
+    where_sql = " AND ".join(where_parts)
+    # Skip assistant utterances — extraction targets user-stated facts.
+    where_sql += " AND m.role IN ('user', 'tool')"
+    sql = f"""
+        SELECT m.id::text             AS message_id,
+               m.turn_id::text        AS turn_id,
+               m.role, m.content,
+               t.session_id, t.user_id, t.timestamp,
+               ts_rank_cd(m.content_tsv, plainto_tsquery('english', $1)) AS score
+        FROM messages m
+        JOIN turns t ON t.id = m.turn_id
+        WHERE {where_sql}
+        ORDER BY score DESC
+        LIMIT ${len(args)}
+    """
+    async with acquire() as conn:
+        rows = await conn.fetch(sql, *args)
+    return [dict(r) for r in rows]
+
+
 async def fetch_recent_messages_for_session(
     session_id: str, limit: int = 6
 ) -> list[dict[str, Any]]:
