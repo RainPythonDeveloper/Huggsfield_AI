@@ -60,6 +60,67 @@ async def fetch_turn_messages(turn_id: str) -> list[dict[str, Any]]:
     return [dict(r) for r in rows]
 
 
+async def fetch_messages_for_turn(turn_id: str) -> list[dict[str, Any]]:
+    async with acquire() as conn:
+        rows = await conn.fetch(
+            "SELECT id::text, content FROM messages WHERE turn_id = $1::uuid ORDER BY position ASC",
+            turn_id,
+        )
+    return [dict(r) for r in rows]
+
+
+async def update_message_embedding(message_id: str, embedding_pgliteral: str) -> None:
+    async with acquire() as conn:
+        await conn.execute(
+            "UPDATE messages SET embedding = $1::vector WHERE id = $2::uuid",
+            embedding_pgliteral,
+            message_id,
+        )
+
+
+async def search_messages_by_embedding(
+    embedding_pgliteral: str,
+    *,
+    user_id: str | None,
+    session_id: str | None,
+    limit: int,
+) -> list[dict[str, Any]]:
+    """Naive cosine top-k over message embeddings.
+
+    Filtering rules:
+      - if user_id given: only that user's turns; no session filter (cross-session is intentional)
+      - if user_id is None but session_id given: scope to that session
+      - if both None: global (mostly used for /search)
+    """
+    where_parts = ["m.embedding IS NOT NULL"]
+    args: list[Any] = [embedding_pgliteral]
+    if user_id is not None:
+        args.append(user_id)
+        where_parts.append(f"t.user_id = ${len(args)}")
+    elif session_id is not None:
+        args.append(session_id)
+        where_parts.append(f"t.session_id = ${len(args)}")
+    args.append(limit)
+    where_sql = " AND ".join(where_parts)
+    sql = f"""
+        SELECT m.id::text         AS message_id,
+               m.turn_id::text    AS turn_id,
+               m.content,
+               t.session_id,
+               t.user_id,
+               t.timestamp,
+               1 - (m.embedding <=> $1::vector) AS score
+        FROM messages m
+        JOIN turns t ON t.id = m.turn_id
+        WHERE {where_sql}
+        ORDER BY m.embedding <=> $1::vector ASC
+        LIMIT ${len(args)}
+    """
+    async with acquire() as conn:
+        rows = await conn.fetch(sql, *args)
+    return [dict(r) for r in rows]
+
+
 # ── Cleanup ────────────────────────────────────────────────────────────────
 
 

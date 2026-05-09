@@ -1,0 +1,37 @@
+{
+  "user_id": "fx-career",
+  "turns": [
+    {
+      "session_id": "career-s1",
+      "timestamp": "2025-01-10T09:00:00Z",
+      "messages": [
+        {"role": "user", "content": "Hey, I'm a software engineer at Stripe working on the payments team. Pretty intense quarter."},
+        {"role": "assistant", "content": "Sounds busy. What's your tech stack?"}
+      ]
+    },
+    {
+      "session_id": "career-s1",
+      "timestamp": "2025-01-10T09:05:00Z",
+      "messages": [
+        {"role": "user", "content": "Mostly Go and a bit of Ruby. We use Postgres and Kafka."},
+        {"role": "assistant", "content": "Good combo for high-throughput services."}
+      ]
+    },
+    {
+      "session_id": "career-s2",
+      "timestamp": "2025-03-22T14:00:00Z",
+      "messages": [
+        {"role": "user", "content": "Big update — I just started at Notion last week. Switched into product management. Stripe was great but I needed a change."},
+        {"role": "assistant", "content": "Congrats on the move! What drew you to PM?"}
+      ]
+    },
+    {
+      "session_id": "career-s2",
+      "timestamp": "2025-03-22T14:05:00Z",
+      "messages": [
+        {"role": "user", "content": "Honestly, after 5 years of writing payments code I wanted to be closer to the user-facing side. Notion's product culture is a great fit."},
+        {"role": "assistant", "content": "Makes sense. Good luck in the new role!"}
+      ]
+    }
+  ]
+}

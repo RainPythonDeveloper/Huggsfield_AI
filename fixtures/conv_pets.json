@@ -1,0 +1,29 @@
+{
+  "user_id": "fx-pets",
+  "turns": [
+    {
+      "session_id": "pets-s1",
+      "timestamp": "2025-02-03T08:30:00Z",
+      "messages": [
+        {"role": "user", "content": "Just got back from walking Biscuit this morning, the park near my place was packed."},
+        {"role": "assistant", "content": "Nice! Hope Biscuit had a good time."}
+      ]
+    },
+    {
+      "session_id": "pets-s1",
+      "timestamp": "2025-02-03T08:35:00Z",
+      "messages": [
+        {"role": "user", "content": "Yeah he loves chasing squirrels. Border collies have endless energy."},
+        {"role": "assistant", "content": "Border collies are notorious for that — smart but high-energy."}
+      ]
+    },
+    {
+      "session_id": "pets-s2",
+      "timestamp": "2025-02-15T19:00:00Z",
+      "messages": [
+        {"role": "user", "content": "Also adopted a cat last weekend. Her name is Pepper, a tabby. Biscuit is still figuring out what to do with her."},
+        {"role": "assistant", "content": "Two pets now! That introduction phase can take a while."}
+      ]
+    }
+  ]
+}

@@ -7,8 +7,10 @@ from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
 
 from memory import __version__
+from memory.clients import embeddings as embed_client
 from memory.config import get_settings
 from memory.db import close_pool, init_pool, ping
+from memory.migrate import apply_migrations
 from memory.routes import cleanup, memories, recall, search, turns
 
 
@@ -27,8 +29,10 @@ async def lifespan(app: FastAPI):
     log = logging.getLogger("memory.startup")
     log.info("starting", extra={"version": __version__})
     await init_pool()
+    await apply_migrations()
     log.info("db_ready")
     yield
+    await embed_client.close_clients()
     await close_pool()
     log.info("shutdown_complete")
 

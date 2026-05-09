@@ -1,0 +1,37 @@
+{
+  "user_id": "fx-prefs",
+  "turns": [
+    {
+      "session_id": "prefs-s1",
+      "timestamp": "2025-01-05T10:00:00Z",
+      "messages": [
+        {"role": "user", "content": "I absolutely love TypeScript. The type system saves me from so many bugs."},
+        {"role": "assistant", "content": "Yeah it's been a game-changer for the JS ecosystem."}
+      ]
+    },
+    {
+      "session_id": "prefs-s2",
+      "timestamp": "2025-02-12T10:00:00Z",
+      "messages": [
+        {"role": "user", "content": "TypeScript generics are starting to drive me crazy. I spent 2 hours fighting with conditional types yesterday."},
+        {"role": "assistant", "content": "Generics edge cases can definitely be painful."}
+      ]
+    },
+    {
+      "session_id": "prefs-s3",
+      "timestamp": "2025-04-20T10:00:00Z",
+      "messages": [
+        {"role": "user", "content": "I've come around on this — TypeScript is fine for big projects with multiple people, but for quick scripts I'd just use Python now. Saves the type-juggling overhead."},
+        {"role": "assistant", "content": "That's a pretty common arc. Right tool for the job."}
+      ]
+    },
+    {
+      "session_id": "prefs-s3",
+      "timestamp": "2025-04-20T10:05:00Z",
+      "messages": [
+        {"role": "user", "content": "Also vegetarian by the way, in case it ever comes up for restaurant suggestions."},
+        {"role": "assistant", "content": "Got it, I'll keep that in mind."}
+      ]
+    }
+  ]
+}

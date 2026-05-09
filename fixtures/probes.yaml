@@ -1,0 +1,81 @@
+# Probe queries → expected facts. Used by tests/test_recall_quality.py.
+# Each probe is run against /recall AND /search; both must include must_contain
+# (case-insensitive substring match) and exclude must_not_contain.
+#
+# Step 2 (naive embedding) baseline target: ≥30% of probes pass.
+# Step 5 (hybrid + rerank) target: ≥70%.
+# Step 7 (multi-hop): multi-hop probes specifically.
+
+probes:
+  # ── conv_career: fact evolution ─────────────────────────────────────────
+  - id: career_current
+    user_id: fx-career
+    query: "Where does the user work?"
+    must_contain: ["Notion"]
+    must_not_dominate: ["Stripe"]
+    notes: "Stripe is older — Notion should win as 'current'."
+
+  - id: career_role
+    user_id: fx-career
+    query: "What is the user's current role?"
+    must_contain: ["product", "manager"]
+    notes: "Switched to PM at Notion."
+
+  - id: career_history
+    user_id: fx-career
+    query: "Has the user ever worked at Stripe?"
+    must_contain: ["Stripe"]
+    notes: "History must be preserved even if no longer active."
+
+  # ── conv_pets: implicit facts ───────────────────────────────────────────
+  - id: pets_dog_name
+    user_id: fx-pets
+    query: "What is the user's dog's name?"
+    must_contain: ["Biscuit"]
+
+  - id: pets_dog_breed
+    user_id: fx-pets
+    query: "What breed is the user's dog?"
+    must_contain: ["border collie"]
+
+  - id: pets_cat
+    user_id: fx-pets
+    query: "Does the user have a cat?"
+    must_contain: ["Pepper"]
+
+  # ── conv_preferences: opinion arc ───────────────────────────────────────
+  - id: prefs_typescript_now
+    user_id: fx-prefs
+    query: "How does the user feel about TypeScript today?"
+    must_contain: ["fine for big projects", "Python"]
+    notes: "Latest opinion is nuanced, not the early enthusiasm."
+
+  - id: prefs_dietary
+    user_id: fx-prefs
+    query: "Any dietary restrictions?"
+    must_contain: ["vegetarian"]
+
+  # ── conv_multihop: requires connecting facts across turns/sessions ─────
+  - id: mh_where_dog_owner_lives
+    user_id: fx-multihop
+    query: "What city does the user with the dog Biscuit live in?"
+    must_contain: ["Berlin"]
+    is_multi_hop: true
+
+  - id: mh_dog_breed_in_berlin
+    user_id: fx-multihop
+    query: "What breed of dog does the user in Berlin have?"
+    must_contain: ["golden retriever"]
+    is_multi_hop: true
+
+  # ── conv_noise: must NOT hallucinate ────────────────────────────────────
+  - id: noise_color
+    user_id: fx-noise
+    query: "What is the user's favorite color?"
+    must_be_empty: true
+    notes: "No data on this — must return empty context, not invent."
+
+  - id: noise_food
+    user_id: fx-noise
+    query: "What's the user's favorite food?"
+    must_be_empty: true

@@ -1,0 +1,37 @@
+{
+  "user_id": "fx-multihop",
+  "turns": [
+    {
+      "session_id": "mh-s1",
+      "timestamp": "2025-03-01T12:00:00Z",
+      "messages": [
+        {"role": "user", "content": "I have a dog named Biscuit, he's a golden retriever."},
+        {"role": "assistant", "content": "Goldens are great. How old?"}
+      ]
+    },
+    {
+      "session_id": "mh-s1",
+      "timestamp": "2025-03-01T12:05:00Z",
+      "messages": [
+        {"role": "user", "content": "Three years old. We adopted him from a shelter in Berlin last summer."},
+        {"role": "assistant", "content": "Glad he found a home with you."}
+      ]
+    },
+    {
+      "session_id": "mh-s2",
+      "timestamp": "2025-03-08T18:00:00Z",
+      "messages": [
+        {"role": "user", "content": "I've been living in Berlin for about 2 years now, moved here from London."},
+        {"role": "assistant", "content": "Big change. How are you finding it?"}
+      ]
+    },
+    {
+      "session_id": "mh-s2",
+      "timestamp": "2025-03-08T18:05:00Z",
+      "messages": [
+        {"role": "user", "content": "Love it. Public transport is amazing compared to London. Also way better for dog owners."},
+        {"role": "assistant", "content": "True, Berlin is one of the most dog-friendly cities I know."}
+      ]
+    }
+  ]
+}

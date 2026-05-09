@@ -1,0 +1,21 @@
+{
+  "user_id": "fx-noise",
+  "turns": [
+    {
+      "session_id": "noise-s1",
+      "timestamp": "2025-04-01T09:00:00Z",
+      "messages": [
+        {"role": "user", "content": "Working on a React app, the bundle size keeps creeping up because of moment.js. Considering switching to date-fns."},
+        {"role": "assistant", "content": "date-fns is much lighter and tree-shakeable. Good call."}
+      ]
+    },
+    {
+      "session_id": "noise-s1",
+      "timestamp": "2025-04-01T09:10:00Z",
+      "messages": [
+        {"role": "user", "content": "Yeah, plus they use ES modules properly. Migration shouldn't be too painful."},
+        {"role": "assistant", "content": "Most date operations have direct equivalents."}
+      ]
+    }
+  ]
+}
