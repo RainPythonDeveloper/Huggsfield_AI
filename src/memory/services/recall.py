@@ -151,10 +151,21 @@ async def _hybrid_memories(
     """Run vector + BM25 in parallel and RRF-fuse. If the embedding call fails
     (Alem 5xx, timeout, etc.) we degrade to BM25-only rather than 500 — the
     eval harness is more tolerant of weaker recall than of crashed endpoints.
+
+    History support (TASK §3 example "previously at Stripe", §9.A "still know
+    the history"): we include `active=False` memories as candidates. The
+    reranker remains the quality gate — historical hits only surface for
+    queries that are genuinely about history. Active facts are bucketed first
+    in assembly so the *current* fact still dominates "where do you work
+    today?" queries.
     """
     bm25_task = asyncio.create_task(
         repository.search_memories_by_bm25(
-            query, user_id=user_id, session_id=session_id, limit=per_channel
+            query,
+            user_id=user_id,
+            session_id=session_id,
+            limit=per_channel,
+            only_active=False,
         )
     )
 
@@ -163,7 +174,11 @@ async def _hybrid_memories(
         qvec = await embeddings.embed(query)
         qlit = embeddings.to_pgvector(qvec)
         vec_rows = await repository.search_memories_by_embedding(
-            qlit, user_id=user_id, session_id=session_id, limit=per_channel
+            qlit,
+            user_id=user_id,
+            session_id=session_id,
+            limit=per_channel,
+            only_active=False,
         )
     except Exception as e:
         log.warning("vector_channel_failed_bm25_only", extra={"error": str(e)})
@@ -296,8 +311,25 @@ def _format_recall_budgeted(
     recent: list[dict],
     budget: int,
 ) -> RecallOut:
-    facts = [r for r in rows if r["type"] in ("fact", "preference", "relation")]
-    other = [r for r in rows if r["type"] not in ("fact", "preference", "relation")]
+    """Bucket priority (TASK §3):
+      1. Stable user facts — active fact/preference/relation.
+      2. Query-relevant — active events/opinions + ALL historical hits
+         (active=false). Historical bullets carry a `(historical)` tag so a
+         frozen LLM can disambiguate per the §3 "previously at Stripe" example.
+      3. Recent raw messages, gated.
+
+    Citations are deduplicated by (turn_id, snippet[:120]) and capped at 6 —
+    one snippet per turn is plenty for the consumer agent.
+    """
+    active_facts = [
+        r for r in rows
+        if r.get("active", True) and r["type"] in ("fact", "preference", "relation")
+    ]
+    other_active = [
+        r for r in rows
+        if r.get("active", True) and r["type"] not in ("fact", "preference", "relation")
+    ]
+    historical = [r for r in rows if not r.get("active", True)]
 
     soft_cap = max(1, int(budget * _SOFT_CAP_RATIO))
     used = 0
@@ -313,19 +345,20 @@ def _format_recall_budgeted(
         used += cost
         return True
 
-    # Bucket 1
-    if facts:
+    # Bucket 1 — stable, current
+    if active_facts:
         if try_add(_HEADER_USER_FACTS):
-            for r in facts:
+            for r in active_facts:
                 bullet = f"- {_humanize(r)}"
                 if not try_add(bullet):
                     break
                 citations.append(_cite(r))
 
-    # Bucket 2
-    if other:
+    # Bucket 2 — query-relevant. Active events/opinions first, then historical.
+    bucket2 = other_active + historical
+    if bucket2:
         if try_add("") and try_add(_HEADER_QUERY_RELEVANT):
-            for r in other:
+            for r in bucket2:
                 bullet = f"- {_humanize(r)}"
                 if not try_add(bullet):
                     break
@@ -348,6 +381,7 @@ def _format_recall_budgeted(
                     )
                 )
 
+    citations = _dedup_citations(citations, cap=6)
     return RecallOut(context="\n".join(lines).strip(), citations=citations)
 
 
@@ -384,9 +418,28 @@ def _humanize(r: dict) -> str:
     key = r["key"].replace("_", " ")
     value = r["value"]
     quote = r.get("raw_quote")
+    tag = "" if r.get("active", True) else " (historical)"
     if quote and len(quote) < 140:
-        return f"{key}: {value} (\"{quote}\")"
-    return f"{key}: {value}"
+        return f"{key}: {value}{tag} (\"{quote}\")"
+    return f"{key}: {value}{tag}"
+
+
+def _dedup_citations(citations: list[Citation], *, cap: int) -> list[Citation]:
+    """Drop duplicate (turn_id, snippet) pairs and cap the list. The contract
+    consumer (the calling agent) shows these to the user — one entry per
+    distinct turn-snippet is plenty.
+    """
+    seen: set[tuple[str, str]] = set()
+    out: list[Citation] = []
+    for c in citations:
+        key = (c.turn_id or "", (c.snippet or "")[:120])
+        if key in seen:
+            continue
+        seen.add(key)
+        out.append(c)
+        if len(out) >= cap:
+            break
+    return out
 
 
 def _cite(r: dict) -> Citation:

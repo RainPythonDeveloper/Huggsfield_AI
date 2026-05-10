@@ -103,6 +103,8 @@ def test_recall_quality(client: httpx.Client):
         for pid, snippet in failed_ids:
             print(f"  ✗ {pid}: ctx={snippet!r}")
 
-    # Step 2 baseline target — we expect this to be modest.
-    # The threshold tightens at later steps.
-    assert recall_at_5 >= 0.0, "smoke check"
+    # v1.0+ achieves 100% on this fixture. 0.85 leaves headroom for upstream
+    # LLM/embed/rerank flakiness while still blocking real regressions.
+    assert recall_at_5 >= 0.85, (
+        f"recall@5 dropped to {recall_at_5:.2%} — investigate failed probes above"
+    )
