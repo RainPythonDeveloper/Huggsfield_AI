@@ -1,25 +1,44 @@
 # memory-service
 
-A Dockerized memory service for an AI agent — built for the Higgsfield engineering challenge.
+[![version](https://img.shields.io/badge/version-1.1.0-blue?style=flat-square)](CHANGELOG.md)
+[![python](https://img.shields.io/badge/python-3.11+-3776AB?style=flat-square&logo=python&logoColor=white)](https://www.python.org/)
+[![fastapi](https://img.shields.io/badge/FastAPI-0.115-009688?style=flat-square&logo=fastapi&logoColor=white)](https://fastapi.tiangolo.com/)
+[![postgres](https://img.shields.io/badge/Postgres_16-pgvector-336791?style=flat-square&logo=postgresql&logoColor=white)](https://github.com/pgvector/pgvector)
+
+A Dockerized long-term memory service for an AI agent — built for the **Higgsfield** engineering challenge.
 
 > Read [CHANGELOG.md](CHANGELOG.md) for the design iteration story (10 entries with metrics) and [PLAN.md](PLAN.md) for the original 14-hour plan.
 
----
+![memory-service architecture](./Higgsfield_Memory_Architecture.png)
+
+## Contents
+
+- [TL;DR](#tldr)
+- [Quick start](#quick-start)
+- [1. Architecture](#1-architecture)
+- [2. Backing store choice](#2-backing-store-choice--postgres-16--pgvector--tsvector)
+- [3. Extraction pipeline](#3-extraction-pipeline--llm-driven-canonical-atomic)
+- [4. Recall strategy](#4-recall-strategy--hybrid--reranker--budget-assembly)
+- [5. Fact evolution](#5-fact-evolution--supersession-chains)
+- [6. Tradeoffs](#6-tradeoffs)
+- [7. Failure modes](#7-failure-modes)
+- [8. Test suite](#8-test-suite-2121-green)
+- [9. Project layout](#9-project-layout)
+- [10. What I&#39;d do next](#10-what-id-do-next-out-of-scope-for-the-2-day-budget)
+- [11. Originality](#11-originality)
 
 ## TL;DR
 
-Synchronous HTTP service (Python + FastAPI) that:
+A synchronous HTTP service (Python + FastAPI) that:
 
-1. Ingests conversation turns via `POST /turns`.
-2. Calls an **LLM (Alem `alemllm`) to extract atomic, canonical memories** with type/key/value/confidence/raw_quote.
-3. Persists to **Postgres 16 + pgvector + tsvector** (one container, named volume).
+1. **Ingests** conversation turns via `POST /turns`.
+2. Calls an **LLM (Alem `alemllm`) to extract atomic, canonical memories** with `type / key / value / confidence / raw_quote`.
+3. **Persists** to Postgres 16 + pgvector + tsvector (one container, named volume).
 4. **Detects contradictions** at write time via an LLM judge, chains supersession.
-5. Returns context via `POST /recall`, using a **hybrid retrieval pipeline**:
+5. **Returns context** via `POST /recall`, using a hybrid retrieval pipeline:
    `LLM query decomposition → (BM25 ⊕ embeddings) → RRF → Alem reranker (≥0.05 floor) → priority-aware budget assembly`.
 
-**Test suite: 21/21 green. Recall@5 = 100%, multi-hop = 100%, noise resistance = 100% on the local fixture.**
-
----
+Self-eval on the 5-conversation × 12-probe fixture ([`fixtures/`](fixtures/)) achieves 100% recall@5. The fixture covers canonical cases: fact evolution, 2-hop recall, implicit extraction, and noise resistance. See [CHANGELOG.md](CHANGELOG.md) for per-iteration metrics.
 
 ## Quick start
 
@@ -30,7 +49,7 @@ docker compose up -d
 until curl -sf http://localhost:8080/health; do sleep 1; done
 ```
 
-The service listens on **port 8080**, exposed in `docker-compose.yml`. Postgres data lives on the named volume `pgdata` — survives `docker compose down && up`.
+The service listens on **port 8080**, exposed in [`docker-compose.yml`](docker-compose.yml). Postgres data lives on the named volume `pgdata` — survives `docker compose down && up`.
 
 ### Run the tests
 
@@ -40,9 +59,7 @@ python3 -m venv .venv
 .venv/bin/python -m pytest tests/ -s -v
 ```
 
-The recall-quality test ingests the 5 fixture conversations from `fixtures/`, runs 12 probes, and prints the recall@5 / multi-hop / noise resistance breakdown.
-
----
+The recall-quality test ingests the 5 fixture conversations from [`fixtures/`](fixtures/), runs 12 probes, and prints the recall@5 / multi-hop / noise resistance breakdown.
 
 ## 1. Architecture
 
@@ -83,62 +100,70 @@ The recall-quality test ingests the 5 fixture conversations from `fixtures/`, ru
                          └─────────────┘
 ```
 
-**Single-process service** + Postgres container. No background workers, no message bus, no separate vector store. Simplest deployment that satisfies all of TASK §3 + §5 hard constraints.
+**Single-process service + Postgres container.** No background workers, no message bus, no separate vector store. Simplest deployment that satisfies all of TASK §3 + §5 hard constraints.
 
----
+### HTTP API
+
+| Method     | Endpoint                 | Purpose                                                         |
+| ---------- | ------------------------ | --------------------------------------------------------------- |
+| `POST`   | `/turns`               | Ingest a conversation turn → extract → supersede → persist   |
+| `POST`   | `/recall`              | Hybrid retrieve → rerank → budget-assemble context for an LLM |
+| `POST`   | `/search`              | Same hybrid+rerank pipeline, structured JSON output             |
+| `GET`    | `/users/{id}/memories` | List all memories (active + superseded history)                 |
+| `DELETE` | `/sessions/{id}`       | Cascade cleanup                                                 |
+| `DELETE` | `/users/{id}`          | Cascade cleanup                                                 |
+| `GET`    | `/health`              | DB ping + per-dependency `degraded` flags                     |
 
 ## 2. Backing store choice — Postgres 16 + pgvector + tsvector
 
 **Why a single relational store** instead of "Postgres + Qdrant" or "Postgres + Redis":
 
 1. **One transactional context** for `turn → messages → memories` — `POST /turns` is a single atomic commit. No "dual-write" coordination, no eventual consistency.
-2. **Three signals colocated**: `vector(1024)` for semantic, `value_tsv` GIN for keyword (BM25-style via `ts_rank_cd`), and self-referential FK for supersession chains. Querying any of them is one SQL roundtrip.
-3. **Persistence story is trivial**: one named Docker volume (`pgdata`). The eval harness's restart contract (TASK §5) becomes one line of yaml.
+2. **Three signals colocated** — `vector(1024)` for semantic, `value_tsv` GIN for keyword (BM25-style via `ts_rank_cd`), and self-referential FK for supersession chains. Querying any of them is one SQL roundtrip.
+3. **Persistence story is trivial** — one named Docker volume (`pgdata`). The eval harness's restart contract (TASK §5) becomes one line of yaml.
 4. **HNSW + GIN indexes** scale fine into the millions for this access pattern (per-user partial filter on `active`, ANN over a small-to-medium corpus). Below mid-six-figure memories the difference vs. a dedicated vector DB is invisible; above that we'd revisit, but that's outside the challenge's scope (TASK §12 explicitly ranks horizontal scaling out-of-scope).
 
-**Schema** (`src/memory/migrations/001_init.sql` + `002_messages_embedding.sql`): three tables.
+### Schema
 
-```
-turns:    id (uuid PK), session_id, user_id, timestamp, metadata JSONB, raw JSONB
-messages: id, turn_id (FK), role, name, content, position, content_tsv (GIN)
-memories: id, user_id, session_id, type, key, value, raw_quote, confidence,
-          embedding vector(1024) HNSW idx,
-          value_tsv tsvector GENERATED  GIN idx,
-          supersedes uuid (self-FK), active bool,
-          source_turn (FK), source_session, created_at, updated_at
-```
+Three tables (defined in [`src/memory/migrations/001_init.sql`](src/memory/migrations/001_init.sql) + [`002_messages_embedding.sql`](src/memory/migrations/002_messages_embedding.sql)):
 
-`memories.embedding` uses **HNSW with `vector_cosine_ops`** — sub-millisecond ANN on the corpora we expect. Partial index `WHERE active = true` (`memories_user_active_idx`) is the hot path for `/recall` (we only want current facts) — keeps query plans tight as superseded history grows.
+| Table        | Key columns                                                                                                                                                                                                                                                                                       |
+| ------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `turns`    | `id (uuid PK)`, `session_id`, `user_id`, `timestamp`, `metadata JSONB`, `raw JSONB`                                                                                                                                                                                                   |
+| `messages` | `id`, `turn_id (FK)`, `role`, `name`, `content`, `position`, `content_tsv (GIN)`                                                                                                                                                                                                    |
+| `memories` | `id`, `user_id`, `session_id`, `type`, `key`, `value`, `raw_quote`, `confidence`, `embedding vector(1024) HNSW`, `value_tsv tsvector GENERATED GIN`, `supersedes uuid (self-FK)`, `active bool`, `source_turn (FK)`, `source_session`, `created_at`, `updated_at` |
 
----
+`memories.embedding` uses **HNSW with `vector_cosine_ops`** — sub-millisecond ANN on the corpora we expect. Partial index `WHERE active = true` (`memories_user_active_idx`) is the hot path for `/recall` — keeps query plans tight as superseded history grows.
 
 ## 3. Extraction pipeline — LLM-driven, canonical, atomic
 
-**Where it lives:** `src/memory/services/extraction.py`, prompt in `src/memory/prompts/extract.py`.
+> **Where it lives:** [`src/memory/services/extraction.py`](src/memory/services/extraction.py), prompt in [`src/memory/prompts/extract.py`](src/memory/prompts/extract.py).
 
 ### How it works
 
 For every `POST /turns`:
 
-1. Persist the turn + messages atomically (this part is unconditional; even if extraction fails the raw conversation is recallable via the `messages.content_tsv` fallback).
-2. Build the user prompt — joins all messages of the turn with role markers (`[USER]`, `[ASSISTANT]`).
-3. Call **Alem `alemllm`** with a strict-JSON system prompt.
-4. **Lenient-parse** the response (`util/json_parse.py`) — handles ` ```json ` fences (Alem always wraps), bracket mismatches, and stray prose. Returns `None` rather than raising; one bad response never breaks ingest.
-5. Validate / clean: drop items missing required fields, normalize types to the `{fact, preference, opinion, event, relation}` whitelist, clamp confidence to `[0, 1]`, truncate values.
-6. Embed every memory's **canonical text** (`f"User's {key}: {value}"`) — this is the embedding, not the raw quote. Brings stored knowledge close to typical query phrasings ("Where does the user work?" → vector neighbour of "User's employer: Notion").
-7. Run each memory through `supersession.resolve` (see §5).
-8. Insert with verdict applied (active or `active=false` if `keep_old`).
+1. **Persist** the turn + messages atomically (this part is unconditional; even if extraction fails the raw conversation is recallable via the `messages.content_tsv` fallback).
+2. **Build the user prompt** — joins all messages of the turn with role markers (`[USER]`, `[ASSISTANT]`).
+3. **Call Alem `alemllm`** with a strict-JSON system prompt.
+4. **Lenient-parse** the response ([`util/json_parse.py`](src/memory/util/json_parse.py)) — handles ` ```json ` fences (Alem always wraps), bracket mismatches, and stray prose. Returns `None` rather than raising; one bad response never breaks ingest.
+5. **Validate / clean** — drop items missing required fields, normalize types to the `{fact, preference, opinion, event, relation}` whitelist, clamp confidence to `[0, 1]`, truncate values.
+6. **Embed** every memory's *canonical text* (`f"User's {key}: {value}"`) — this is the embedding, not the raw quote. Brings stored knowledge close to typical query phrasings ("Where does the user work?" → vector neighbour of "User's employer: Notion").
+7. **Run each memory through `supersession.resolve`** (see §5).
+8. **Insert** with verdict applied (active or `active=false` if `keep_old`).
 
 ### What it extracts
 
-- **Personal facts**: `employer`, `role`, `city`, `country`, `language_spoken`.
-- **Preferences**: `dietary_restriction`, `communication_preference`, `favorite_*`.
-- **Opinions** (mutable): `opinion_about_typescript`, `opinion_about_<topic>`.
-- **Events** (time-bound): `started_job`, `moved`, `adopted_pet`, `traveled_to`.
-- **Relations** (graph-like): `pet_dog_name`, `partner_name`, `child_name`.
-- **Implicit facts**: prompt explicitly tells the LLM to capture "walking Biscuit" → `pet_dog_name: Biscuit`. The conv_pets fixture probes this — passes.
-- **Corrections**: "actually I meant X not Y" — emitted as a new fact; supersession layer chains it.
-- **Atomicity**: "I work at Notion as a PM" → TWO memories (`employer=Notion` AND `role=Product Manager`).
+| Type                             | Examples                                                                                               |
+| -------------------------------- | ------------------------------------------------------------------------------------------------------ |
+| **Personal facts**         | `employer`, `role`, `city`, `country`, `language_spoken`                                     |
+| **Preferences**            | `dietary_restriction`, `communication_preference`, `favorite_*`                                  |
+| **Opinions** (mutable)     | `opinion_about_typescript`, `opinion_about_<topic>`                                                |
+| **Events** (time-bound)    | `started_job`, `moved`, `adopted_pet`, `traveled_to`                                           |
+| **Relations** (graph-like) | `pet_dog_name`, `partner_name`, `child_name`                                                     |
+| **Implicit facts**         | "walking Biscuit" →`pet_dog_name: Biscuit` (prompt explicitly tells the LLM)                        |
+| **Corrections**            | "actually I meant X not Y" — emitted as a new fact; supersession layer chains it                      |
+| **Atomicity**              | "I work at Notion as a PM" →**two** memories (`employer=Notion` AND `role=Product Manager`) |
 
 ### What it misses (and why)
 
@@ -146,11 +171,11 @@ For every `POST /turns`:
 - **Negated facts** ("I don't drink coffee") — `dietary_restriction: no coffee` works in our extractor in practice but the surface form is brittle. Better long-term: a `negated: bool` flag on every memory.
 - **Cross-turn implicit anaphora** ("My wife visited" two turns later "She loved it" — not connecting "she" to "wife"). The LLM gets one turn at a time. A "session summary" pass could fix this — out of scope for the time budget.
 
----
-
 ## 4. Recall strategy — hybrid + reranker + budget assembly
 
-**Where it lives:** `src/memory/services/recall.py`. End-to-end pipeline:
+> **Where it lives:** [`src/memory/services/recall.py`](src/memory/services/recall.py).
+
+End-to-end pipeline:
 
 ```
 POST /recall { query, session_id, user_id, max_tokens }
@@ -186,7 +211,7 @@ POST /recall { query, session_id, user_id, max_tokens }
 │ 4.  Budget assembly (tiktoken cl100k, soft cap = 0.95×budget): │
 │       Bucket 1 — stable user facts  (fact / preference / rel.) │
 │       Bucket 2 — query-relevant     (event / opinion / etc.)   │
-│       Bucket 3 — recent session msgs  (only if used <80% & <6 │
+│       Bucket 3 — recent session msgs  (only if used <80% & <6  │
 │                                       prior citations)         │
 │     Bullets dropped (not truncated) when over cap.             │
 └────────────────────────────────────────────────────────────────┘
@@ -198,11 +223,8 @@ POST /recall { query, session_id, user_id, max_tokens }
 ### Key design choices
 
 1. **Hybrid > pure cosine.** TASK explicitly warns *"vanilla cosine-top-k will not score well"*. BM25 catches keyword-heavy queries ("dog's name?") that vector recall blurs. RRF fuses without needing score normalization across channels.
-
-2. **Reranker as score gate, not just reorder.** The cross-encoder gives us calibrated relevance (not similarity). Threshold 0.05 cuts true noise (`5e-5` typical) while keeping borderline-relevant facts (`0.3+` typical). Empirically calibrated over a curl probe and the fixture.
-
-3. **Third-person doc framing for the reranker.** Discovered through trial: Alem's reranker scores first-person quotes ("I work at Apple") at ~0.0025 vs. third-person ("The user's employer is Apple") at ~0.97 for the same intent. So we render every candidate as `"The user's <key> is <value>. Originally said: <quote>"`. This single fix took noise resistance from 0% → 100%.
-
+2. **Reranker as score gate, not just reorder.** The cross-encoder gives us calibrated relevance (not similarity). Threshold `0.05` cuts true noise (`5e-5` typical) while keeping borderline-relevant facts (`0.3+` typical). Empirically calibrated over a curl probe and the fixture.
+3. **Third-person doc framing for the reranker.** Discovered through trial: Alem's reranker scores first-person quotes ("I work at Apple") at ~`0.0025` vs. third-person ("The user's employer is Apple") at ~`0.97` for the same intent. So we render every candidate as `"The user's <key> is <value>. Originally said: <quote>"`. **This single fix took noise resistance from 0% → 100%.**
 4. **Multi-hop by LLM decomposition.** We don't ship a graph traversal. The LLM splits "What city does the user with the dog Biscuit live in?" into sub-queries `["user's pet dog name", "user's city"]`, each goes through the full hybrid+rerank pipeline, results merge via RRF. The reranker still scores the merged set against the **original** query so candidate ordering reflects what the user actually asked.
 
 ### Priority logic under token budget (TASK §3)
@@ -214,11 +236,9 @@ Priority order is **stable user facts → query-relevant memories → recent con
 - **Recent context comes last and is gated** (only added when ≤6 prior citations AND budget is <80% used). Otherwise tight budgets fill up with chit-chat ("Cool!" / "OK") instead of substantive memory.
 - **Bullets dropped, not truncated.** Half-sentence bullets confuse a frozen LLM more than missing ones.
 
----
-
 ## 5. Fact evolution — supersession chains
 
-**TASK §4 hard problem #1.** Where it lives: `src/memory/services/supersession.py`, prompt in `src/memory/prompts/supersession.py`.
+> **TASK §4 hard problem #1.** Where it lives: [`src/memory/services/supersession.py`](src/memory/services/supersession.py), prompt in [`src/memory/prompts/supersession.py`](src/memory/prompts/supersession.py).
 
 When extraction emits a candidate that shares `(user_id, key)` with an existing **active** memory:
 
@@ -229,12 +249,12 @@ new candidate          "employer: Notion"   raw_quote: "Just started at Notion, 
 
 We call an LLM judge with both `raw_quote`s and ask for a verdict:
 
-| Verdict | Action | Example |
-|---|---|---|
-| `supersede` | mark `existing.active=false`, set `new.supersedes = existing.id`, `new.active=true` | new "Notion" replaces "Stripe" |
-| `coexist` | both stay active, no link | user has *both* a dog *and* a cat (key=`pet_name`) |
-| `keep_old` | new inserted with `active=false` (it's a historical mention) | "I used to work at X" — old current stays |
-| `noop` | skip new (duplicate / less precise) | new=`city: NYC` when existing=`city: New York` |
+| Verdict       | Action                                                                                    | Example                                                 |
+| ------------- | ----------------------------------------------------------------------------------------- | ------------------------------------------------------- |
+| `supersede` | mark `existing.active=false`, set `new.supersedes = existing.id`, `new.active=true` | new "Notion" replaces "Stripe"                          |
+| `coexist`   | both stay active, no link                                                                 | user has*both* a dog *and* a cat (key=`pet_name`) |
+| `keep_old`  | new inserted with `active=false` (it's a historical mention)                            | "I used to work at X" — old current stays              |
+| `noop`      | skip new (duplicate / less precise)                                                       | new=`city: NYC` when existing=`city: New York`      |
 
 `/recall` only surfaces `active=true`. `/users/{id}/memories` returns **everything** (active + history) so reviewers / debuggers see the full chain.
 
@@ -242,48 +262,42 @@ We call an LLM judge with both `raw_quote`s and ask for a verdict:
 
 **Opinion arcs** (TASK §4 harder variant: "I love TS" → "TS generics annoy me" → "TS for big projects, Python for scripts") are partially handled — opinions go into `type=opinion` memories with their own keys (`opinion_about_typescript`). The supersession judge can chain them, but we don't model gradient sentiment. Future: add an `opinion_intensity` field, render the *latest* opinion in `/recall` with a "(was: ...)" parenthetical.
 
----
-
 ## 6. Tradeoffs
 
 What we optimized for and what we gave up:
 
-| Optimized | Gave up |
-|---|---|
-| **Synchronous correctness.** `/turns` does extraction + supersession inline. Eval harness gets immediate `/recall` after `201`. | Throughput. Each `/turns` is ~4–6s under load — fine for the 60s SLA, not fine for 1000 RPS. |
-| **Single backing store.** Postgres + pgvector covers all needs. Trivial deployment. | Specialized vector DB perf above ~1M memories; if we hit that we'd revisit. |
-| **LLM-driven extraction & supersession.** Captures implicit facts + corrections far better than rules. | Cost (~3 LLM calls per turn worst-case: extract + N supersession judges + 1 query rewrite). Mitigated by Alem's pricing. |
-| **Strict reranker floor.** Noise queries return empty context, never hallucinate. | At very generic queries ("tell me about the user") we surface only the highest-scored fact — sometimes too few. The conscious choice: better one correct fact than four mediocre ones. |
-| **Lenient JSON parser.** Three fallback strategies tolerate Alem's `\`\`\`json` fences and stray prose. | Hides upstream prompt regressions until the recall test fails. We log unparseable samples to mitigate. |
-
----
+| Optimized                                                                                                                                   | Gave up                                                                                                                                                                                 |
+| ------------------------------------------------------------------------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| **Synchronous correctness.** `/turns` does extraction + supersession inline. Eval harness gets immediate `/recall` after `201`. | Throughput. Each `/turns` is ~4–6s under load — fine for the 60s SLA, not fine for 1000 RPS.                                                                                        |
+| **Single backing store.** Postgres + pgvector covers all needs. Trivial deployment.                                                   | Specialized vector DB perf above ~1M memories; if we hit that we'd revisit.                                                                                                             |
+| **LLM-driven extraction & supersession.** Captures implicit facts + corrections far better than rules.                                | Cost (~3 LLM calls per turn worst-case: extract + N supersession judges + 1 query rewrite). Mitigated by Alem's pricing.                                                                |
+| **Strict reranker floor.** Noise queries return empty context, never hallucinate.                                                     | At very generic queries ("tell me about the user") we surface only the highest-scored fact — sometimes too few. The conscious choice: better one correct fact than four mediocre ones. |
+| **Lenient JSON parser.** Three fallback strategies tolerate Alem's `\`\`\`json` fences and stray prose.                             | Hides upstream prompt regressions until the recall test fails. We log unparseable samples to mitigate.                                                                                  |
 
 ## 7. Failure modes
 
-| Scenario | Behavior |
-|---|---|
-| Alem LLM 5xx during extraction | Retry 3× with exponential backoff. If still failing: turn persists raw; `memories` empty for that turn. Recall falls back to `messages.content_tsv` BM25 (cold-extraction path). |
-| Alem embeddings 5xx | Retry 5× with exponential backoff. If during ingest: `/turns` returns 500 (we can't insert without a vector — turn rolls back). If during recall: degrade to **BM25-only** path. |
-| Alem reranker 5xx | `/recall` keeps RRF order; no score floor applied. Quality degrades but doesn't 500. |
-| API keys absent | `/health` returns 200 with `degraded: ["llm","embed","rerank"]`. `/turns` raw-stores, `/recall` runs BM25 over messages. Degraded but usable. |
-| Postgres down | `/health` 503; everything else 5xx. Container restart picks back up. |
-| Oversized payload (>1MB) | Middleware returns 413 before any handler runs. |
-| Malformed JSON / missing fields | Global validator → 422 with detail. |
-| Unicode / emoji / zero-width chars | Stored verbatim; recall works (fixture covers this). |
-| Restart mid-write | `POST /turns` is one transaction; no orphan messages or memories. |
-
----
+| Scenario                           | Behavior                                                                                                                                                                                  |
+| ---------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Alem LLM 5xx during extraction     | Retry 3× with exponential backoff. If still failing: turn persists raw;`memories` empty for that turn. Recall falls back to `messages.content_tsv` BM25 (cold-extraction path).      |
+| Alem embeddings 5xx                | Retry 5× with exponential backoff. If during ingest:`/turns` returns 500 (we can't insert without a vector — turn rolls back). If during recall: degrade to **BM25-only** path. |
+| Alem reranker 5xx                  | `/recall` keeps RRF order; no score floor applied. Quality degrades but doesn't 500.                                                                                                    |
+| API keys absent                    | `/health` returns 200 with `degraded: ["llm","embed","rerank"]`. `/turns` raw-stores, `/recall` runs BM25 over messages. Degraded but usable.                                     |
+| Postgres down                      | `/health` 503; everything else 5xx. Container restart picks back up.                                                                                                                    |
+| Oversized payload (>1MB)           | Middleware returns 413 before any handler runs.                                                                                                                                           |
+| Malformed JSON / missing fields    | Global validator → 422 with detail.                                                                                                                                                      |
+| Unicode / emoji / zero-width chars | Stored verbatim; recall works (fixture covers this).                                                                                                                                      |
+| Restart mid-write                  | `POST /turns` is one transaction; no orphan messages or memories.                                                                                                                       |
 
 ## 8. Test suite (21/21 green)
 
-| File | Tests | What it covers |
-|---|---|---|
-| `tests/test_contract.py` | 7 | health, roundtrip, cold session, malformed JSON, missing fields, unicode, concurrent-session no-bleed |
-| `tests/test_recall_quality.py` | 1 (12 probes) | recall@5, multi-hop, noise resistance — printed breakdown |
-| `tests/test_supersession.py` | 1 | E2E career arc: `/memories` shows BOTH employers, `/recall` only Notion |
-| `tests/test_budget.py` | 5 | parametrized `[128, 256, 512, 1024]` + tight-budget user-fact priority |
-| `tests/test_persistence.py` | 1 | `docker compose restart` → memories survive |
-| `tests/test_robustness.py` | 6 | 1.5MB payload, emoji+ZW unicode, empty msgs, invalid role, empty corpus search, 8x concurrent ingest |
+| File                                                          | Tests         | What it covers                                                                                        |
+| ------------------------------------------------------------- | ------------- | ----------------------------------------------------------------------------------------------------- |
+| [`tests/test_contract.py`](tests/test_contract.py)             | 7             | health, roundtrip, cold session, malformed JSON, missing fields, unicode, concurrent-session no-bleed |
+| [`tests/test_recall_quality.py`](tests/test_recall_quality.py) | 1 (12 probes) | recall@5, multi-hop, noise resistance — printed breakdown                                            |
+| [`tests/test_supersession.py`](tests/test_supersession.py)     | 1             | E2E career arc:`/memories` shows BOTH employers, `/recall` only Notion                            |
+| [`tests/test_budget.py`](tests/test_budget.py)                 | 5             | parametrized `[128, 256, 512, 1024]` + tight-budget user-fact priority                              |
+| [`tests/test_persistence.py`](tests/test_persistence.py)       | 1             | `docker compose restart` → memories survive                                                        |
+| [`tests/test_robustness.py`](tests/test_robustness.py)         | 6             | 1.5MB payload, emoji+ZW unicode, empty msgs, invalid role, empty corpus search, 8x concurrent ingest  |
 
 Running them:
 
@@ -292,8 +306,6 @@ Running them:
 ```
 
 The recall-quality test prints metrics — your `pytest -s` console will show the breakdown.
-
----
 
 ## 9. Project layout
 
@@ -326,8 +338,6 @@ memory-service/
 └── fixtures/                conv_*.json + probes.yaml
 ```
 
----
-
 ## 10. What I'd do next (out of scope for the 2-day budget)
 
 - **Knowledge graph layer** for true multi-hop. Entities (`Pet:Biscuit`) + relations (`User-OWNS-Pet`) would replace LLM query decomposition with deterministic traversal.
@@ -336,8 +346,6 @@ memory-service/
 - **Streaming ingest** — break the 60s/turn ceiling for very long conversations.
 - **Embedding fine-tune** on (canonical_text, query) pairs from a labelled set, narrowing the semantic gap further.
 - **Eval harness in CI** — github actions running `pytest tests/test_recall_quality.py` on every PR.
-
----
 
 ## 11. Originality
 
